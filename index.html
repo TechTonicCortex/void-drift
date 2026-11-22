@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Void Drift</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Orbitron',monospace; }
+canvas { position:fixed; top:0; left:0; }
+
+#hud {
+  position:fixed; top:0; left:0; right:0; z-index:10;
+  padding:16px 24px;
+  display:flex; justify-content:space-between; align-items:flex-start;
+  background:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent);
+  pointer-events:none;
+}
+.hb { display:flex; flex-direction:column; gap:2px; }
+.hl { font-size:9px; letter-spacing:3px; color:rgba(79,195,247,0.5); }
+.hv { font-size:22px; font-weight:900; color:#4fc3f7; }
+.hv.gold { color:#ffd54f; }
+
+/* Shield bar */
+#shieldBar {
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  z-index:10; width:200px; pointer-events:none;
+}
+#shieldLabel { font-size:9px; letter-spacing:3px; color:rgba(79,195,247,0.5); text-align:center; margin-bottom:5px; }
+#shieldTrack { width:100%; height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden; }
+#shieldFill { height:100%; background:linear-gradient(90deg,#4fc3f7,#81d4fa); border-radius:3px; transition:width 0.2s; }
+
+/* Screens */
+.screen {
+  position:fixed; inset:0; z-index:20;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+  background:rgba(0,0,5,0.9);
+}
+.screen.off { display:none; }
+.stitle { font-size:52px; font-weight:900; color:#4fc3f7; letter-spacing:5px; text-shadow:0 0 30px rgba(79,195,247,0.5); }
+.ssub   { font-size:11px; color:rgba(79,195,247,0.45); letter-spacing:3px; }
+.sbig   { font-size:32px; font-weight:700; color:#ffd54f; letter-spacing:2px; }
+.sscore { font-size:12px; color:rgba(255,255,255,0.3); letter-spacing:2px; }
+.sbtn {
+  margin-top:4px; background:none; border:2px solid #4fc3f7; border-radius:4px;
+  padding:13px 34px; font-family:'Orbitron',monospace; font-size:12px; font-weight:700;
+  letter-spacing:3px; color:#4fc3f7; cursor:pointer; transition:all 0.2s;
+}
+.sbtn:hover { background:rgba(79,195,247,0.1); box-shadow:0 0 20px rgba(79,195,247,0.3); }
+.sbtn.red { border-color:#ff5252; color:#ff5252; }
+.sbtn.red:hover { background:rgba(255,82,82,0.1); }
+.shint { font-size:10px; color:rgba(255,255,255,0.2); letter-spacing:1px; text-align:center; line-height:2.2; }
+
+#distFlash {
+  position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  z-index:10; font-size:28px; font-weight:900; letter-spacing:3px;
+  color:#ffd54f; text-shadow:0 0 20px rgba(255,213,79,0.5);
+  opacity:0; pointer-events:none; transition:opacity 0.3s;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div class="hb">
+    <div class="hl">DISTANCE</div>
+    <div class="hv" id="hDist">0m</div>
+  </div>
+  <div class="hb" style="align-items:center">
+    <div class="hl">SPEED</div>
+    <div class="hv" id="hSpeed">1×</div>
+  </div>
+  <div class="hb" style="align-items:flex-end">
+    <div class="hl">BEST</div>
+    <div class="hv gold" id="hBest">0m</div>
+  </div>
+</div>
+
+<div id="shieldBar">
+  <div id="shieldLabel">SHIELD</div>
+  <div id="shieldTrack"><div id="shieldFill" style="width:100%"></div></div>
+</div>
+
+<div id="distFlash"></div>
+
+<div class="screen" id="sStart">
+  <div class="stitle">VOID<br>DRIFT</div>
+  <div class="ssub">SURVIVE AS LONG AS YOU CAN</div>
+  <button class="sbtn" id="btnStart">LAUNCH →</button>
+  <div class="shint">
+    WASD / ARROWS — Rotate &amp; Thrust<br>
+    Dodge obstacles · Collect orbs for shield<br>
+    Speed increases over time · No finish line
+  </div>
+</div>
+
+<div class="screen off" id="sOver">
+  <div class="stitle" style="font-size:38px;color:#ff5252">CRASHED</div>
+  <div class="sbig" id="oDist"></div>
+  <div class="sscore" id="oBest"></div>
+  <button class="sbtn red" id="btnRetry">RETRY →</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize(){ W=canvas.width=window.innerWidth; H=canvas.height=window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const TAU = Math.PI*2;
+const keys = {};
+let running = false;
+let best = parseInt(localStorage.getItem('voidBest')||'0');
+document.getElementById('hBest').textContent = best+'m';
+
+// ── GAME STATE ────────────────────────────────────────────────────
+let ship, obstacles, orbs, parts, stars;
+let dist, speed, shield, frame, invTimer, startX, startY;
+let camX, camY; // camera follows ship
+
+// ── SHIP ──────────────────────────────────────────────────────────
+function makeShip() {
+  return { x:W/2, y:H/2, vx:0, vy:0, angle:-Math.PI/2, r:15, thrusting:false };
+}
+
+function drawShip() {
+  if (!ship) return;
+  if (invTimer>0 && Math.floor(invTimer/5)%2===0) return;
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.angle);
+
+  // Shield glow
+  if (shield>0) {
+    const shieldAlpha = 0.15 + 0.15*Math.sin(frame*0.15);
+    ctx.beginPath(); ctx.arc(0,0,ship.r+12,0,TAU);
+    ctx.strokeStyle=`rgba(79,195,247,${shieldAlpha+0.2})`;
+    ctx.lineWidth=3; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0,0,ship.r+8,0,TAU);
+    ctx.fillStyle=`rgba(79,195,247,${shieldAlpha})`;
+    ctx.fill();
+  }
+
+  // Body
+  ctx.beginPath();
+  ctx.moveTo(22,0); ctx.lineTo(-14,-12); ctx.lineTo(-8,0); ctx.lineTo(-14,12);
+  ctx.closePath();
+  ctx.fillStyle = '#4fc3f7'; ctx.fill();
+  ctx.strokeStyle='#b3e5fc'; ctx.lineWidth=1.5; ctx.stroke();
+
+  // Thruster flame
+  if (ship.thrusting) {
+    ctx.beginPath();
+    ctx.moveTo(-8,0);
+    ctx.lineTo(-8-20-Math.random()*16, (Math.random()-0.5)*10);
+    ctx.strokeStyle=`rgba(255,${80+Math.random()*120},0,0.9)`;
+    ctx.lineWidth=3; ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── STARS ─────────────────────────────────────────────────────────
+function makeStars() {
+  stars = [];
+  for (let i=0; i<300; i++) {
+    stars.push({
+      x: (Math.random()-0.5)*8000,
+      y: (Math.random()-0.5)*8000,
+      r: 0.4+Math.random()*1.4,
+      a: 0.2+Math.random()*0.7,
+      layer: 0.2+Math.random()*0.9 // parallax
+    });
+  }
+}
+
+// ── OBSTACLES ─────────────────────────────────────────────────────
+const OBS_TYPES = [
+  // spinning blade
+  { type:'blade',  col:'#ff5252', r:28 },
+  // drifting rock
+  { type:'rock',   col:'#78909c', r:36 },
+  // laser wall (tall rectangle)
+  { type:'laser',  col:'#ff9800', r:20 },
+  // mine (sits still)
+  { type:'mine',   col:'#ce93d8', r:18 },
+  // bouncer
+  { type:'bounce', col:'#80cbc4', r:24 },
+];
+
+function spawnObstacle() {
+  // Spawn ahead of ship in a random direction
+  const angle = Math.random()*TAU;
+  const dist2 = 500 + Math.random()*400;
+  const def = OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)];
+  const spd = (0.5+Math.random()*1.5) * (1+dist*0.0005);
+  const vAngle = Math.random()*TAU;
+
+  const o = {
+    x: ship.x + Math.cos(angle)*dist2,
+    y: ship.y + Math.sin(angle)*dist2,
+    r: def.r, col: def.col, type: def.type,
+    vx: def.type==='mine'?0:Math.cos(vAngle)*spd,
+    vy: def.type==='mine'?0:Math.sin(vAngle)*spd,
+    rot:0, rotSpd:(Math.random()-0.5)*0.06,
+    // Laser-specific
+    w:16, h:100+Math.random()*120,
+    // Bouncer velocity flip tracker
+    bvx: Math.cos(vAngle)*spd, bvy: Math.sin(vAngle)*spd,
+    // Shape for rock
+    shape: Array.from({length:8},()=>0.7+Math.random()*0.3),
+    life: 600+Math.random()*300
+  };
+
+  // Bouncer moves and bounces off a bounding box
+  if (def.type==='bounce') { o.vx=o.bvx; o.vy=o.bvy; }
+
+  obstacles.push(o);
+}
+
+function drawObstacle(o) {
+  ctx.save();
+  ctx.translate(o.x, o.y);
+  ctx.rotate(o.rot);
+
+  if (o.type==='blade') {
+    // Spinning 4-pointed blade
+    for (let i=0; i<4; i++) {
+      ctx.save();
+      ctx.rotate(i*Math.PI/2);
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.bezierCurveTo(8,-10, o.r,-8, o.r,0);
+      ctx.bezierCurveTo(o.r,8, 8,10, 0,0);
+      ctx.fillStyle=o.col; ctx.fill();
+      ctx.restore();
+    }
+    // Centre
+    ctx.beginPath(); ctx.arc(0,0,7,0,TAU);
+    ctx.fillStyle='#b71c1c'; ctx.fill();
+
+  } else if (o.type==='rock') {
+    ctx.beginPath();
+    o.shape.forEach((s,i)=>{
+      const a=(i/o.shape.length)*TAU;
+      const r=o.r*s;
+      i===0?ctx.moveTo(Math.cos(a)*r,Math.sin(a)*r):ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r);
+    });
+    ctx.closePath();
+    ctx.fillStyle=o.col; ctx.fill();
+    ctx.strokeStyle='#b0bec5'; ctx.lineWidth=1.5; ctx.stroke();
+
+  } else if (o.type==='laser') {
+    // Pulsing laser wall
+    const p = 0.5+0.5*Math.sin(frame*0.2);
+    ctx.fillStyle=`rgba(255,152,0,${0.3+p*0.4})`;
+    ctx.fillRect(-o.w/2,-o.h/2,o.w,o.h);
+    ctx.strokeStyle=`rgba(255,200,0,${0.7+p*0.3})`;
+    ctx.lineWidth=2;
+    ctx.strokeRect(-o.w/2,-o.h/2,o.w,o.h);
+    // Core beam
+    ctx.fillStyle=`rgba(255,255,200,${0.6+p*0.4})`;
+    ctx.fillRect(-3,-o.h/2,6,o.h);
+
+  } else if (o.type==='mine') {
+    // Spiky mine
+    for (let i=0; i<8; i++) {
+      const a=(i/8)*TAU+o.rot;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*(o.r-4),Math.sin(a)*(o.r-4));
+      ctx.lineTo(Math.cos(a)*(o.r+10),Math.sin(a)*(o.r+10));
+      ctx.strokeStyle=o.col; ctx.lineWidth=2.5; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0,0,o.r-4,0,TAU);
+    ctx.fillStyle='#4a148c'; ctx.fill();
+    ctx.strokeStyle=o.col; ctx.lineWidth=2; ctx.stroke();
+    // Blinking light
+    if (Math.floor(frame/20)%2===0) {
+      ctx.beginPath(); ctx.arc(0,0,4,0,TAU);
+      ctx.fillStyle='#ff0'; ctx.fill();
+    }
+
+  } else if (o.type==='bounce') {
+    ctx.beginPath(); ctx.arc(0,0,o.r,0,TAU);
+    const g=ctx.createRadialGradient(0,0,0,0,0,o.r);
+    g.addColorStop(0,'#b2dfdb'); g.addColorStop(1,'#00796b');
+    ctx.fillStyle=g; ctx.fill();
+    ctx.strokeStyle='#e0f2f1'; ctx.lineWidth=2; ctx.stroke();
+    // Arrow showing direction
+    ctx.beginPath();
+    ctx.moveTo(o.vx*4,o.vy*4);
+    ctx.lineTo(o.vx*10,o.vy*10);
+    ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=2; ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── ORBS (shield pickups) ─────────────────────────────────────────
+function spawnOrb() {
+  const angle=Math.random()*TAU, d=400+Math.random()*300;
+  orbs.push({
+    x:ship.x+Math.cos(angle)*d,
+    y:ship.y+Math.sin(angle)*d,
+    r:10, pulse:Math.random()*TAU, life:500
+  });
+}
+
+function drawOrb(o) {
+  o.pulse+=0.08;
+  const p=0.8+0.2*Math.sin(o.pulse);
+  const g=ctx.createRadialGradient(o.x,o.y,0,o.x,o.y,o.r*p*2);
+  g.addColorStop(0,'rgba(79,195,247,0.4)');
+  g.addColorStop(1,'rgba(79,195,247,0)');
+  ctx.beginPath(); ctx.arc(o.x,o.y,o.r*p*2,0,TAU);
+  ctx.fillStyle=g; ctx.fill();
+  ctx.beginPath(); ctx.arc(o.x,o.y,o.r*p,0,TAU);
+  ctx.fillStyle='#4fc3f7'; ctx.fill();
+  ctx.strokeStyle='#e1f5fe'; ctx.lineWidth=1.5; ctx.stroke();
+}
+
+// ── PARTICLES ─────────────────────────────────────────────────────
+function explode(x,y,n,col){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*TAU, s=1+Math.random()*5;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:20+Math.random()*30,maxLife:50,r:1+Math.random()*3,col:col||`hsl(${20+Math.random()*30},100%,60%)`});
+  }
+}
+
+// ── COLLISION ─────────────────────────────────────────────────────
+function dist2d(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+
+function obsRadius(o) {
+  if (o.type==='laser') return Math.max(o.w,o.h)/2;
+  return o.r;
+}
+
+function collidesWithShip(o) {
+  if (o.type==='laser') {
+    // Rotated rect collision
+    const dx=ship.x-o.x, dy=ship.y-o.y;
+    const cos=Math.cos(-o.rot), sin=Math.sin(-o.rot);
+    const lx=dx*cos-dy*sin, ly=dx*sin+dy*cos;
+    return Math.abs(lx)<o.w/2+ship.r && Math.abs(ly)<o.h/2+ship.r;
+  }
+  return dist2d(ship,o)<o.r+ship.r-6;
+}
+
+// ── HIT SHIP ──────────────────────────────────────────────────────
+function hitShip(o) {
+  if (invTimer>0) return;
+  if (shield>0) {
+    shield = Math.max(0,shield-34);
+    invTimer=40;
+    explode(ship.x,ship.y,15,'#4fc3f7');
+    updateShieldBar();
+    return;
+  }
+  // Dead
+  explode(ship.x,ship.y,35,'#ff5252');
+  running=false;
+  const dm=Math.round(dist);
+  if (dm>best){ best=dm; localStorage.setItem('voidBest',best); }
+  setTimeout(()=>{
+    document.getElementById('oDist').textContent='DISTANCE: '+dm+'m';
+    document.getElementById('oBest').textContent='BEST: '+best+'m';
+    document.getElementById('sOver').classList.remove('off');
+  },700);
+}
+
+function updateShieldBar(){
+  document.getElementById('shieldFill').style.width=(shield/100*100)+'%';
+}
+
+// ── FLASH ─────────────────────────────────────────────────────────
+function flash(txt,col){
+  const el=document.getElementById('distFlash');
+  el.textContent=txt; el.style.color=col||'#ffd54f';
+  el.style.opacity='1';
+  setTimeout(()=>el.style.opacity='0',1000);
+}
+
+// ── START ─────────────────────────────────────────────────────────
+function startGame(){
+  document.getElementById('sStart').classList.add('off');
+  document.getElementById('sOver').classList.add('off');
+  ship=makeShip();
+  obstacles=[]; orbs=[]; parts=[];
+  dist=0; speed=1; shield=60; frame=0; invTimer=120;
+  startX=W/2; startY=H/2;
+  camX=ship.x; camY=ship.y;
+  makeStars();
+  // Pre-spawn some obstacles
+  for(let i=0;i<8;i++) spawnObstacle();
+  for(let i=0;i<4;i++) spawnOrb();
+  running=true;
+  updateShieldBar();
+  document.getElementById('hBest').textContent=best+'m';
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('btnStart').onclick=startGame;
+document.getElementById('btnRetry').onclick=startGame;
+
+// ── UPDATE ────────────────────────────────────────────────────────
+function update(){
+  if(!running) return;
+  frame++;
+
+  // Speed ramps up based on time, much more slowly
+  speed = 1 + frame*0.00008;
+  const speedCapped = Math.min(speed, 3.5);
+
+  // Ship controls
+  if(keys['ArrowLeft']||keys['KeyA'])  ship.angle-=0.055;
+  if(keys['ArrowRight']||keys['KeyD']) ship.angle+=0.055;
+  ship.thrusting=!!(keys['ArrowUp']||keys['KeyW']);
+  if(ship.thrusting){
+    ship.vx+=Math.cos(ship.angle)*0.25;
+    ship.vy+=Math.sin(ship.angle)*0.25;
+    explode(ship.x-Math.cos(ship.angle)*18,ship.y-Math.sin(ship.angle)*18,1,'hsl(35,100%,60%)');
+  }
+  ship.vx*=0.985; ship.vy*=0.985;
+  ship.x+=ship.vx; ship.y+=ship.vy;
+
+  // Distance = total displacement from starting position
+  dist = Math.hypot(ship.x - startX, ship.y - startY);
+
+  // Milestones
+  const dm=Math.round(dist);
+  if(dm>0&&dm%500===0&&frame%60<3) flash('🏁 '+dm+'m','#4fc3f7');
+
+  if(invTimer>0) invTimer--;
+
+  // Camera smoothly follows ship
+  camX+=(ship.x-camX)*0.08;
+  camY+=(ship.y-camY)*0.08;
+
+  // Obstacles
+  let spawnChance = 0.02 + speedCapped*0.008;
+  if(Math.random()<spawnChance) spawnObstacle();
+
+  for(let i=obstacles.length-1;i>=0;i--){
+    const o=obstacles[i];
+    o.x+=o.vx; o.y+=o.vy;
+    o.rot+=o.rotSpd*(1+speedCapped*0.3);
+    o.life--;
+
+    // Bouncer bounces
+    if(o.type==='bounce'){
+      const dx=o.x-ship.x, dy=o.y-ship.y;
+      const d=Math.hypot(dx,dy);
+      if(d>800){ o.vx*=-1; o.vy*=-1; } // bounce if too far
+    }
+
+    if(o.life<=0||dist2d(o,ship)>1200){
+      obstacles.splice(i,1); continue;
+    }
+
+    // Collision
+    if(running && collidesWithShip(o)){
+      explode(o.x,o.y,10,o.col);
+      hitShip(o);
+    }
+  }
+
+  // Orbs
+  if(Math.random()<0.005) spawnOrb();
+  for(let i=orbs.length-1;i>=0;i--){
+    const o=orbs[i];
+    o.life--;
+    if(o.life<=0||dist2d(o,ship)>900){ orbs.splice(i,1); continue; }
+    if(dist2d(o,ship)<o.r+ship.r+8){
+      shield=Math.min(shield+25,100);
+      explode(o.x,o.y,12,'#4fc3f7');
+      flash('+SHIELD','#4fc3f7');
+      updateShieldBar();
+      orbs.splice(i,1);
+    }
+  }
+
+  // Particles
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i];
+    p.x+=p.vx; p.y+=p.vy; p.vx*=0.93; p.vy*=0.93; p.life--;
+    if(p.life<=0) parts.splice(i,1);
+  }
+
+  // Slowly drain shield
+  if(frame%180===0&&shield>0){ shield=Math.max(0,shield-3); updateShieldBar(); }
+
+  // HUD
+  document.getElementById('hDist').textContent=Math.round(dist)+'m';
+  document.getElementById('hSpeed').textContent=speedCapped.toFixed(1)+'×';
+}
+
+// ── DRAW ──────────────────────────────────────────────────────────
+function draw(){
+  ctx.fillStyle='#010810';
+  ctx.fillRect(0,0,W,H);
+
+  // Parallax stars
+  stars.forEach(s=>{
+    const sx=((s.x-camX*s.layer)%W+W)%W;
+    const sy=((s.y-camY*s.layer)%H+H)%H;
+    ctx.beginPath(); ctx.arc(sx,sy,s.r,0,TAU);
+    ctx.fillStyle=`rgba(255,255,255,${s.a})`; ctx.fill();
+  });
+
+  // Camera offset for all world objects
+  ctx.save();
+  ctx.translate(W/2-camX, H/2-camY);
+
+  // Orbs
+  orbs.forEach(drawOrb);
+
+  // Obstacles
+  obstacles.forEach(drawObstacle);
+
+  // Particles
+  parts.forEach(p=>{
+    const a=p.life/p.maxLife;
+    ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(0,p.r*a),0,TAU);
+    ctx.fillStyle=p.col+(Math.floor(a*255).toString(16).padStart(2,'0'));
+    ctx.fill();
+  });
+
+  // Ship
+  drawShip();
+
+  ctx.restore();
+
+  // Speed lines effect at high speed
+  if(speed>2){
+    const alpha=(speed-2)/3;
+    for(let i=0;i<8;i++){
+      const lx=Math.random()*W, ly=Math.random()*H;
+      const len=20+Math.random()*40;
+      ctx.beginPath();
+      ctx.moveTo(lx,ly);
+      ctx.lineTo(lx+Math.cos(ship.angle)*len,ly+Math.sin(ship.angle)*len);
+      ctx.strokeStyle=`rgba(79,195,247,${alpha*0.15})`;
+      ctx.lineWidth=1; ctx.stroke();
+    }
+  }
+}
+
+// ── LOOP ──────────────────────────────────────────────────────────
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────
+window.addEventListener('keydown',e=>{ keys[e.code]=true; if(e.code==='Space') e.preventDefault(); });
+window.addEventListener('keyup',e=>{ keys[e.code]=false; });
+</script>
+</body>
+</html>
